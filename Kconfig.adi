@@ -84,6 +84,14 @@ config KERNEL_ALL_ADI_DRIVERS
 	select FB_TFT_SEPS525
 	select LEDS_AS3645A
 
+config KUIPER
+	tristate "Enable ADI Kuiper image support"
+	select FUSE_FS
+	select NAMESPACES
+	select USER_NS
+	select SECCOMP
+
+
 source "drivers/clk/Kconfig.adi"
 source "drivers/hwmon/Kconfig.adi"
 source "drivers/iio/Kconfig.adi"

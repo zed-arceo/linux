@@ -12,6 +12,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pwm.h>
+#include <linux/pwm/axi-pwmgen.h>
 #include <linux/slab.h>
 
 #define AXI_PWMGEN_REG_CORE_VERSION	0x00
@@ -37,6 +38,7 @@ struct axi_pwmgen {
 
 	/* Used to store the period when the channel is disabled */
 	unsigned int		ch_period[4];
+	unsigned long long	state_unit;
 };
 
 static inline unsigned int axi_pwmgen_read(struct axi_pwmgen *pwm,
@@ -71,33 +73,80 @@ static inline struct axi_pwmgen *to_axi_pwmgen(struct pwm_chip *chip)
 static int axi_pwmgen_apply(struct pwm_chip *chip, struct pwm_device *device,
 			     const struct pwm_state *state)
 {
-	unsigned long clk_rate, period_cnt, duty_cnt, offset_cnt;
-	u64 tmp;
+	unsigned long period_cnt, duty_cnt, offset_cnt = 0;
+	struct axi_pwmgen *pwm = to_axi_pwmgen(chip);
+	unsigned long long target_rate, clk_rate;
 	unsigned int ch = device->hwpwm;
-	struct axi_pwmgen *pwm;
 
-	pwm = to_axi_pwmgen(chip);
 	clk_rate = clk_get_rate(pwm->clk);
+	if (clk_rate < pwm->state_unit)
+		return -EINVAL;
+	if (state->enabled) {
+		target_rate = div64_u64(pwm->state_unit, state->period);
+		if (target_rate > clk_rate)
+			return -EINVAL;
+		period_cnt = div64_u64(clk_rate, target_rate);
+		pwm->ch_period[ch] = period_cnt;
+	} else {
+		pwm->ch_period[ch] = 0;
+	}
+	axi_pwmgen_write(pwm, AXI_PWMGEN_CHX_PERIOD(ch), pwm->ch_period[ch]);
 
-	tmp = (u64)clk_rate * state->period;
-	period_cnt = DIV_ROUND_UP_ULL(tmp, NSEC_PER_SEC);
-	pwm->ch_period[ch] = period_cnt;
-	/* The register is 0 based */
-	axi_pwmgen_write(pwm, AXI_PWMGEN_CHX_PERIOD(ch),
-		state->enabled ? (pwm->ch_period[ch] - 1) : 0);
-
-	tmp = (u64)clk_rate * state->duty_cycle;
-	duty_cnt = DIV_ROUND_UP_ULL(tmp, NSEC_PER_SEC);
+	target_rate = div64_u64(pwm->state_unit, state->duty_cycle);
+	duty_cnt = div64_u64(clk_rate, target_rate);
 	axi_pwmgen_write(pwm, AXI_PWMGEN_CHX_DUTY(ch), duty_cnt);
 
-	tmp = (u64)clk_rate * state->offset;
-	offset_cnt = DIV_ROUND_UP_ULL(tmp, NSEC_PER_SEC);
-	axi_pwmgen_write(pwm, AXI_PWMGEN_CHX_OFFSET(ch), state->offset ? offset_cnt : 0);
+	if (state->offset) {
+		target_rate = div64_u64(pwm->state_unit, state->offset);
+		offset_cnt = div64_u64(clk_rate, target_rate);
+	}
+	axi_pwmgen_write(pwm, AXI_PWMGEN_CHX_OFFSET(ch), offset_cnt);
 
 	/* Apply the new config */
 	axi_pwmgen_write(pwm, AXI_PWMGEN_REG_CONFIG, AXI_PWMGEN_LOAD_CONIG);
 
 	return 0;
+}
+
+int axi_pwmgen_set_state_unit(struct pwm_chip *chip, enum axi_pwmgen_state_unit unit)
+{
+	struct axi_pwmgen *pwm = to_axi_pwmgen(chip);
+	unsigned long long clk_rate;
+
+	clk_rate = clk_get_rate(pwm->clk);
+	if (clk_rate > axi_pwmgen_state_unit_table[unit]) {
+		dev_err(chip->dev, "the reference clock frequency is too high\n");
+		return -EINVAL;
+	}
+
+	pwm->state_unit = axi_pwmgen_state_unit_table[unit];
+
+	return 0;
+}
+			
+static void axi_pwmgen_get_state(struct pwm_chip *chip, struct pwm_device *device,
+				struct pwm_state *state)
+{
+	unsigned long clk_period, period_cnt, duty_cnt, offset_cnt;
+	struct axi_pwmgen *pwmgen = to_axi_pwmgen(chip);
+	unsigned int ch = device->hwpwm;
+	unsigned long long clk_rate;
+
+	clk_rate = clk_get_rate(pwmgen->clk);
+
+	clk_period = div64_u64(pwmgen->state_unit, clk_rate);
+	period_cnt = axi_pwmgen_read(pwmgen, AXI_PWMGEN_CHX_PERIOD(ch));
+	if (period_cnt != 0)
+		state->enabled = true;
+	else
+		state->enabled = false;
+	state->period = clk_period * period_cnt;
+
+	duty_cnt = axi_pwmgen_read(pwmgen, AXI_PWMGEN_CHX_DUTY(ch));
+	state->duty_cycle = clk_period * duty_cnt;
+
+	offset_cnt = axi_pwmgen_read(pwmgen, AXI_PWMGEN_CHX_OFFSET(ch));
+	state->offset = clk_period * offset_cnt;
 }
 
 static void axi_pwmgen_disable(struct pwm_chip *chip, struct pwm_device *pwm)
@@ -124,6 +173,7 @@ static const struct pwm_ops axi_pwmgen_pwm_ops = {
 	.apply = axi_pwmgen_apply,
 	.disable = axi_pwmgen_disable,
 	.enable = axi_pwmgen_enable,
+	.get_state = axi_pwmgen_get_state,
 	.owner = THIS_MODULE,
 };
 
@@ -159,6 +209,8 @@ static int axi_pwmgen_setup(struct pwm_chip *chip)
 		axi_pwmgen_write(pwm, AXI_PWMGEN_CHX_DUTY(idx), 0);
 		axi_pwmgen_write(pwm, AXI_PWMGEN_CHX_OFFSET(idx), 0);
 	}
+
+	axi_pwmgen_set_state_unit(chip, AXI_PWMGEN_UNIT_NSEC);
 
 	/* Enable the core */
 	axi_pwmgen_write_mask(pwm, AXI_PWMGEN_REG_CONFIG, AXI_PWMGEN_RESET, 0);
