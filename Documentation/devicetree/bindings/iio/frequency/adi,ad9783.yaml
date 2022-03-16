@@ -15,12 +15,6 @@ description: |
   dynamic range, dual digital-to-analog converters (DACs) with
   12-/14-/16-bit resolutions, and sample rates of up to 500 MSPS.
 
-notes: |
-  This device depends on the AXI-ADC IP core. Please refer to:
-
-  http://devicetree.org/schemas/iio/adc/adi,axi-adc.yaml
-  https://wiki.analog.com/resources/fpga/docs/axi_adc_ip
-
 properties:
   compatible:
     enum:
@@ -29,20 +23,16 @@ properties:
       - adi,ad9783
 
   reg:
-    description:
-      SPI chip select number for the device
     maxItems: 1
 
   spi-max-frequency:
-    description: Maximum SPI clocking speed of device in Hz
+    maximum: 10000000
 
   clocks:
     description:
       DAC sampling clock input
 
   clocks-names:
-    description:
-      DAC sampling clock target name
     const: dac_clk
 
 required:
@@ -52,12 +42,17 @@ required:
   - clock-names
 
 examples:
-  dts: |
-    ad9783_spi: adc@0 {
-      compatible = "adi,ad9783";
-      reg = <0>;
-      spi-max-freequency = <10000000>;
-      clocks = <&ad9783_clk>;
-      clock-names = "dac_clk";
+  - |
+    spi {
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            ad9783_spi: adc@0 {
+                    compatible = "adi,ad9783";
+                    reg = <0>;
+                    spi-max-freequency = <10000000>;
+                    clocks = <&ad9783_clk>;
+                    clock-names = "dac_clk";
+            };
     };
 
